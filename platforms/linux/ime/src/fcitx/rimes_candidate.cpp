@@ -1,0 +1,91 @@
+#include "rimes_candidate.hpp"
+
+#include <stdexcept>
+
+#include <fcitx-utils/textformatflags.h>
+
+#include "rimes_ime.hpp"
+#include "rimes_state.hpp"
+
+namespace fcitx {
+
+RimesCandidateWord::RimesCandidateWord(RimesIme* ime, int index, Text text)
+    : CandidateWord(std::move(text)), ime_(ime), index_(index) {}
+
+void RimesCandidateWord::select(InputContext* inputContext) const {
+    if (ime_ == nullptr || inputContext == nullptr) {
+        return;
+    }
+    auto* state = inputContext->propertyFor(&ime_->factory());
+    if (state != nullptr) {
+        state->selectCandidate(index_);
+    }
+}
+
+RimesCandidateList::RimesCandidateList(RimesIme* ime,
+                                       InputContext* ic,
+                                       const rimes::linuxime::EngineSnapshot& snapshot)
+    : ime_(ime),
+      ic_(ic),
+      cursor_(snapshot.highlighted),
+      has_prev_(snapshot.page_no > 0),
+      has_next_(!snapshot.is_last_page) {
+    setPageable(this);
+    labels_.reserve(snapshot.candidates.size());
+    words_.reserve(snapshot.candidates.size());
+    for (std::size_t index = 0; index < snapshot.candidates.size(); ++index) {
+        const auto& candidate = snapshot.candidates[index];
+        std::string label = candidate.label.empty()
+                                ? std::to_string((index + 1) % 10)
+                                : candidate.label;
+        if (!label.empty() && label.back() != ' ') {
+            label.push_back(' ');
+        }
+        labels_.emplace_back(std::move(label));
+        Text word(candidate.text);
+        if (!candidate.comment.empty()) {
+            word.append(" ");
+            word.append(candidate.comment, TextFormatFlag::DontCommit);
+        }
+        words_.emplace_back(std::make_unique<RimesCandidateWord>(
+            ime_, static_cast<int>(index), std::move(word)));
+    }
+}
+
+const Text& RimesCandidateList::label(int idx) const {
+    checkIndex(idx);
+    return labels_[static_cast<std::size_t>(idx)];
+}
+
+const CandidateWord& RimesCandidateList::candidate(int idx) const {
+    checkIndex(idx);
+    return *words_[static_cast<std::size_t>(idx)];
+}
+
+int RimesCandidateList::size() const { return static_cast<int>(words_.size()); }
+
+int RimesCandidateList::cursorIndex() const { return cursor_; }
+
+CandidateLayoutHint RimesCandidateList::layoutHint() const {
+    return CandidateLayoutHint::Vertical;
+}
+
+void RimesCandidateList::prev() {
+    if (auto* state = ic_->propertyFor(&ime_->factory())) {
+        state->page(false);
+    }
+}
+
+void RimesCandidateList::next() {
+    if (auto* state = ic_->propertyFor(&ime_->factory())) {
+        state->page(true);
+    }
+}
+
+void RimesCandidateList::checkIndex(int idx) const {
+    if (idx < 0 || idx >= size()) {
+        throw std::invalid_argument("candidate index out of range");
+    }
+}
+
+}  // namespace fcitx

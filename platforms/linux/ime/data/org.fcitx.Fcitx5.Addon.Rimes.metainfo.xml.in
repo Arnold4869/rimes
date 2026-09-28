@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="addon">
+  <id>org.fcitx.Fcitx5.Addon.Rimes</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>RIMES</name>
+  <summary>RIMES input method for Fcitx 5</summary>
+  <description>
+    <p>A Fcitx5 frontend for RIMES that links librime and deploys the reviewed RIMES rime-data set. Isolated from stock fcitx5-rime user data.</p>
+  </description>
+  <url type="homepage">https://github.com/scholay/rimes</url>
+  <provides>
+    <id>rimes</id>
+  </provides>
+</component>
