@@ -17,7 +17,7 @@ public:
     void keyEvent(KeyEvent& event);
     void activate();
     void reset();
-    void deactivate();
+    void deactivate(const InputContextEvent& event);
     void selectCandidate(int index);
     void page(bool next);
     void applySnapshot(const rimes::linuxime::EngineSnapshot& snapshot);

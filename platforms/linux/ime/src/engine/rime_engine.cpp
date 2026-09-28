@@ -5,6 +5,10 @@
 #include <utility>
 #include <vector>
 
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
+
 #include <rime_api.h>
 
 #include "rime_key.hpp"
@@ -80,19 +84,17 @@ public:
             const bool full_check =
                 options.full_maintenance_check ||
                 !std::filesystem::exists(options.user_data_dir / "build");
-            if (!RunMaintenanceLocked(full_check, error)) {
+            if (!RunMaintenanceLocked(full_check, options.wait_for_maintenance, error)) {
                 StopLocked();
                 return false;
             }
-
-            const RimeSessionId smoke = api_->create_session();
-            if (smoke == 0) {
-                SetError(error, "librime smoke session creation failed");
+            if (deploying_) {
+                return true;
+            }
+            if (!FinishReadyLocked(error)) {
                 StopLocked();
                 return false;
             }
-            api_->destroy_session(smoke);
-            healthy_ = true;
             return true;
         } catch (...) {
             try {
@@ -122,10 +124,43 @@ public:
         }
     }
 
+    bool IsDeploying() const noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return deploying_ && !healthy_;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    bool PollMaintenance(std::string* error) noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (healthy_ && api_ != nullptr) {
+                return true;
+            }
+            if (!initialized_ || api_ == nullptr) {
+                SetError(error, "librime is not initialized");
+                return false;
+            }
+            if (api_->is_maintenance_mode != nullptr && api_->is_maintenance_mode() != 0) {
+                return false;
+            }
+            if (api_->join_maintenance_thread != nullptr) {
+                api_->join_maintenance_thread();
+            }
+            deploying_ = false;
+            return FinishReadyLocked(error);
+        } catch (...) {
+            SetError(error, "exception while polling librime maintenance");
+            return false;
+        }
+    }
+
     bool RunMaintenance(bool full_check, std::string* error) noexcept {
         try {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!healthy_) {
+            if (!healthy_ && !initialized_) {
                 SetError(error, "librime is not initialized");
                 return false;
             }
@@ -133,7 +168,7 @@ public:
                 SetError(error, "librime maintenance requires all sessions to close");
                 return false;
             }
-            return RunMaintenanceLocked(full_check, error);
+            return RunMaintenanceLocked(full_check, true, error);
         } catch (...) {
             SetError(error, "exception while running librime maintenance");
             return false;
@@ -354,18 +389,50 @@ private:
         return true;
     }
 
-    bool RunMaintenanceLocked(bool full_check, std::string* error) noexcept {
-        if (api_->start_maintenance == nullptr ||
-            api_->join_maintenance_thread == nullptr) {
+    bool RunMaintenanceLocked(bool full_check, bool wait, std::string* error) noexcept {
+        if (api_->start_maintenance == nullptr) {
             SetError(error, "librime maintenance API is unavailable");
             return false;
         }
         const bool started = api_->start_maintenance(full_check ? True : False) != 0;
-        if (started ||
-            (api_->is_maintenance_mode != nullptr && api_->is_maintenance_mode() != 0)) {
-            api_->join_maintenance_thread();
+        const bool in_maintenance =
+            started ||
+            (api_->is_maintenance_mode != nullptr && api_->is_maintenance_mode() != 0);
+        if (!in_maintenance) {
+            deploying_ = false;
+            return true;
         }
+        if (!wait) {
+            deploying_ = true;
+            healthy_ = false;
+            return true;
+        }
+        if (api_->join_maintenance_thread == nullptr) {
+            SetError(error, "librime maintenance API is unavailable");
+            return false;
+        }
+        api_->join_maintenance_thread();
+        deploying_ = false;
         return true;
+    }
+
+    bool FinishReadyLocked(std::string* error) noexcept {
+        const RimeSessionId smoke = api_->create_session();
+        if (smoke == 0) {
+            SetError(error, "librime smoke session creation failed");
+            return false;
+        }
+        api_->destroy_session(smoke);
+        healthy_ = true;
+        deploying_ = false;
+        ReleaseBuildHeap();
+        return true;
+    }
+
+    static void ReleaseBuildHeap() noexcept {
+#ifdef __GLIBC__
+        malloc_trim(0);
+#endif
     }
 
     bool CollectSnapshotLocked(SessionId session,
@@ -482,21 +549,30 @@ private:
                 api_->destroy_session(session);
             }
             sessions_.clear();
+            if (initialized_ && api_->join_maintenance_thread != nullptr &&
+                (deploying_ ||
+                 (api_->is_maintenance_mode != nullptr &&
+                  api_->is_maintenance_mode() != 0))) {
+                api_->join_maintenance_thread();
+            }
             if (initialized_ && api_->finalize != nullptr) {
                 api_->finalize();
             }
         }
+        deploying_ = false;
         initialized_ = false;
         api_ = nullptr;
         shared_data_dir_.clear();
         user_data_dir_.clear();
         log_dir_.clear();
+        ReleaseBuildHeap();
     }
 
     mutable std::mutex mutex_;
     RimeApi* api_ = nullptr;
     bool initialized_ = false;
     bool healthy_ = false;
+    bool deploying_ = false;
     std::string shared_data_dir_;
     std::string user_data_dir_;
     std::string log_dir_;
@@ -516,6 +592,12 @@ bool RimeEngine::Start(const RimeEngineOptions& options, std::string* error) noe
 void RimeEngine::Stop() noexcept { impl_->Stop(); }
 
 bool RimeEngine::IsHealthy() const noexcept { return impl_->IsHealthy(); }
+
+bool RimeEngine::IsDeploying() const noexcept { return impl_->IsDeploying(); }
+
+bool RimeEngine::PollMaintenance(std::string* error) noexcept {
+    return impl_->PollMaintenance(error);
+}
 
 bool RimeEngine::RunMaintenance(bool full_check, std::string* error) noexcept {
     return impl_->RunMaintenance(full_check, error);

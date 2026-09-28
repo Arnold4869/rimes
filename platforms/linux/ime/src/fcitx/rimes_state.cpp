@@ -1,10 +1,11 @@
 #include "rimes_state.hpp"
 
-#include <fcitx/inputpanel.h>
-#include <fcitx/userinterface.h>
+#include <fcitx-utils/capabilityflags.h>
 #include <fcitx-utils/key.h>
 #include <fcitx-utils/log.h>
 #include <fcitx-utils/textformatflags.h>
+#include <fcitx/inputpanel.h>
+#include <fcitx/userinterface.h>
 
 #include "engine/rime_key.hpp"
 #include "rimes_candidate.hpp"
@@ -65,6 +66,9 @@ std::int32_t RimesState::ModifierMask(const KeyEvent& event) const {
 }
 
 void RimesState::keyEvent(KeyEvent& event) {
+    if (ime_->engine().IsDeploying()) {
+        return;
+    }
     if (!ime_->engine().IsHealthy()) {
         return;
     }
@@ -124,17 +128,20 @@ void RimesState::reset() {
     applySnapshot(snapshot);
 }
 
-void RimesState::deactivate() {
+void RimesState::deactivate(const InputContextEvent& event) {
     if (session_ == 0) {
         return;
     }
-    rimes::linuxime::EngineSnapshot snapshot;
-    std::string error;
-    ime_->engine().CommitComposition(session_, &snapshot, &error);
-    applySnapshot(snapshot);
-    if (snapshot.commit_text.empty() && composing_) {
-        reset();
+    // Focus-out already commits the client preedit in the frontend
+    // (GTK/Qt). Extra commit_composition here produced "ni hao你好".
+    // Match stock fcitx5-rime: only commit on an explicit IM switch.
+    if (event.type() == EventType::InputContextSwitchInputMethod) {
+        rimes::linuxime::EngineSnapshot snapshot;
+        std::string error;
+        ime_->engine().CommitComposition(session_, &snapshot, &error);
+        applySnapshot(snapshot);
     }
+    reset();
 }
 
 void RimesState::selectCandidate(int index) {
@@ -183,8 +190,14 @@ void RimesState::UpdateUI(const rimes::linuxime::EngineSnapshot& snapshot) {
         preedit.append(snapshot.preedit, TextFormatFlag::Underline);
         preedit.setCursor(static_cast<int>(snapshot.caret_utf8));
     }
-    panel.setClientPreedit(preedit);
-    panel.setPreedit(preedit);
+    // Stock fcitx5-rime: inline preedit XOR popup preedit row.
+    if (ic_->capabilityFlags().test(CapabilityFlag::Preedit)) {
+        panel.setClientPreedit(preedit);
+        panel.setPreedit(Text());
+    } else {
+        panel.setClientPreedit(Text());
+        panel.setPreedit(preedit);
+    }
 
     if (!snapshot.candidates.empty()) {
         panel.setCandidateList(std::make_unique<RimesCandidateList>(ime_, ic_, snapshot));

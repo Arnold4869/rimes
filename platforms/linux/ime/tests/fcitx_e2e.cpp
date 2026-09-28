@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 
+#include <fcitx-utils/capabilityflags.h>
 #include <fcitx-utils/eventdispatcher.h>
 #include <fcitx-utils/key.h>
 #include <fcitx-utils/testing.h>
@@ -78,11 +79,16 @@ int main(int argc, char** argv) {
         if (instance.inputMethod(ic) != "rimes") {
             Die("could not switch the test context to rimes");
         }
+        ic->setCapabilityFlags(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit} |
+                               fcitx::CapabilityFlag::ClientUnfocusCommit);
 
         frontend->call<fcitx::ITestFrontend::pushCommitExpectation>("你好");
         Type(frontend, uuid, "nihao");
-        if (ic->inputPanel().clientPreedit().empty() && ic->inputPanel().preedit().empty()) {
-            Die("nihao produced no preedit");
+        if (ic->inputPanel().clientPreedit().empty()) {
+            Die("nihao produced no inline preedit");
+        }
+        if (!ic->inputPanel().preedit().empty()) {
+            Die("inline-capable client also showed preedit in the popup");
         }
         auto candidates = ic->inputPanel().candidateList();
         if (!candidates || candidates->size() < 1) {
@@ -140,6 +146,23 @@ int main(int argc, char** argv) {
         frontend->call<fcitx::ITestFrontend::keyEvent>(uuid, fcitx::Key("Escape"), false);
         frontend->call<fcitx::ITestFrontend::keyEvent>(uuid, fcitx::Key("Escape"), true);
         std::cout << "ok: testfrontend Escape\n";
+
+        // Focus-out must not commit again. testfrontend fatals on any commit
+        // that was not pushed, so this also asserts no double commit.
+        Type(frontend, uuid, "nihao");
+        if (ic->inputPanel().clientPreedit().empty()) {
+            Die("expected inline preedit before focus-out");
+        }
+        // No commit expectation: a leftover 你好 from CommitComposition on
+        // focus-out would fatal in testfrontend. The visible client preedit
+        // is the frontend's job (GTK leaves "ni hao").
+        ic->focusOut();
+        ic->focusIn();
+        if (!ic->inputPanel().clientPreedit().empty() ||
+            !ic->inputPanel().preedit().empty()) {
+            Die("focus-out left a leftover preedit");
+        }
+        std::cout << "ok: testfrontend focus-out did not commit\n";
 
         frontend->call<fcitx::ITestFrontend::destroyInputContext>(uuid);
         instance.exit();

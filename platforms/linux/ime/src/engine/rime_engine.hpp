@@ -15,6 +15,9 @@ struct RimeEngineOptions {
     std::filesystem::path user_data_dir;
     std::filesystem::path log_dir;
     bool full_maintenance_check = false;
+    // Tests wait so they can type immediately. The Fcitx5 addon must not:
+    // join_maintenance_thread on the UI thread freezes every client.
+    bool wait_for_maintenance = true;
 };
 
 // Process-wide librime owner. One instance per Fcitx5 addon process. Sessions
@@ -32,6 +35,12 @@ public:
     bool Start(const RimeEngineOptions& options, std::string* error = nullptr) noexcept;
     void Stop() noexcept;
     [[nodiscard]] bool IsHealthy() const noexcept;
+    [[nodiscard]] bool IsDeploying() const noexcept;
+
+    // Returns true once maintenance has finished and the engine is healthy.
+    // Safe to call from the Fcitx5 main thread: it never joins while librime
+    // is still compiling dictionaries.
+    bool PollMaintenance(std::string* error = nullptr) noexcept;
 
     bool RunMaintenance(bool full_check, std::string* error = nullptr) noexcept;
 

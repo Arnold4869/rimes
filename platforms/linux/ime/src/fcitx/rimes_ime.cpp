@@ -2,8 +2,10 @@
 
 #include <filesystem>
 
-#include <fcitx/inputcontextmanager.h>
+#include <fcitx-utils/event.h>
 #include <fcitx-utils/log.h>
+#include <fcitx/inputcontextmanager.h>
+#include <fcitx/userinterface.h>
 
 #include "engine/rime_hooks.hpp"
 #include "engine/rime_paths.hpp"
@@ -31,14 +33,43 @@ RimesIme::RimesIme(Instance* instance)
     options.shared_data_dir = paths.shared_data_dir;
     options.user_data_dir = paths.user_data_dir;
     options.log_dir = paths.log_dir;
+    options.wait_for_maintenance = false;
 
     std::string error;
     if (!engine_.Start(options, &error)) {
         FCITX_LOGC(rimes_log, Error) << "librime start failed: " << error;
+    } else if (engine_.IsDeploying()) {
+        FCITX_LOGC(rimes_log, Info) << "librime first-run deploy started in the background";
+        StartDeployWatch();
     }
 }
 
-RimesIme::~RimesIme() = default;
+RimesIme::~RimesIme() { deploy_timer_.reset(); }
+
+void RimesIme::StartDeployWatch() {
+    deploy_timer_ = instance_->eventLoop().addTimeEvent(
+        CLOCK_MONOTONIC, now(CLOCK_MONOTONIC) + 200000, 200000,
+        [this](EventSourceTime* source, uint64_t) {
+            if (engine_.PollMaintenance()) {
+                source->setEnabled(false);
+                OnDeployReady();
+                return true;
+            }
+            source->setTime(now(CLOCK_MONOTONIC) + 200000);
+            return true;
+        });
+}
+
+void RimesIme::OnDeployReady() {
+    FCITX_LOGC(rimes_log, Info) << "librime deploy finished";
+    instance_->inputContextManager().foreachFocused([this](InputContext* ic) {
+        if (instance_->inputMethod(ic) == "rimes") {
+            instance_->showInputMethodInformation(ic);
+            ic->updateUserInterface(UserInterfaceComponent::StatusArea);
+        }
+        return true;
+    });
+}
 
 void RimesIme::keyEvent(const InputMethodEntry& entry, KeyEvent& keyEvent) {
     FCITX_UNUSED(entry);
@@ -60,7 +91,7 @@ void RimesIme::deactivate(const InputMethodEntry& entry, InputContextEvent& even
     FCITX_UNUSED(entry);
     auto* state = event.inputContext()->propertyFor(&factory_);
     if (state != nullptr) {
-        state->deactivate();
+        state->deactivate(event);
     }
 }
 
@@ -74,6 +105,9 @@ void RimesIme::reset(const InputMethodEntry& entry, InputContextEvent& event) {
 
 std::string RimesIme::subMode(const InputMethodEntry& entry, InputContext& inputContext) {
     FCITX_UNUSED(entry);
+    if (engine_.IsDeploying()) {
+        return "Deploying";
+    }
     auto* state = inputContext.propertyFor(&factory_);
     if (state == nullptr) {
         return {};

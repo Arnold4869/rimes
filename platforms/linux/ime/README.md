@@ -12,11 +12,13 @@ in later.
 
 ## What works
 
-- Preedit (client + panel) and Fcitx5 candidate UI
+- Preedit and Fcitx5 candidate UI (inline XOR popup row, matching stock rime)
 - Space commit (`nihao` + Space → `你好` on `rime_ice`)
 - Number keys 1–9 select the current page
 - Page Up / Page Down
 - Escape cancels composition without committing
+- First-run dictionary deploy runs in the background; Fcitx5 stays responsive
+  and keys pass through until librime is ready (`subMode` shows `Deploying`)
 - Isolated user directory: `$XDG_DATA_HOME/rimes` (not `…/fcitx5/rime`)
 - Shared data: `$prefix/share/rimes/data` (policy-staged 55-file closure)
 

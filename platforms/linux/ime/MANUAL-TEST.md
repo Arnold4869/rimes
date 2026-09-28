@@ -38,7 +38,11 @@ For each host above:
    if those schemas deployed. Type a short sample in at least one other schema.
 8. Click into a password field. RIMES must not leak preedit into the password
    widget in a surprising way; note the toolkit behaviour.
-9. Switch away mid-composition, then back. No stuck preedit, no double commit.
+9. Switch away mid-composition, then back. GTK hosts should keep only the
+   visible preedit (`ni hao`), not `ni hao你好`. No stuck preedit.
+10. First-run deploy: `rm -rf ~/.local/share/rimes`, restart fcitx5 with RIMES
+    in the profile, type immediately. Other IMs and `fcitx5-remote` must stay
+    responsive. Status may show `Deploying` until dictionaries finish.
 
 ## Session / compositor notes
 

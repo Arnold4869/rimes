@@ -2,10 +2,12 @@
 #include "engine/rime_key.hpp"
 #include "engine/rime_paths.hpp"
 
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <thread>
 
 namespace {
 
@@ -42,6 +44,7 @@ int main(int argc, char** argv) {
     options.user_data_dir = argv[2];
     options.log_dir = argc >= 4 ? argv[3] : options.user_data_dir / "log";
     options.full_maintenance_check = true;
+    options.wait_for_maintenance = false;
 
     std::string error;
     if (!rimes::linuxime::LooksLikeSharedData(options.shared_data_dir)) {
@@ -52,10 +55,38 @@ int main(int argc, char** argv) {
         Die(error);
     }
 
+    const bool first_deploy =
+        !std::filesystem::exists(options.user_data_dir / "build");
     rimes::linuxime::RimeEngine engine;
+    const auto start_at = std::chrono::steady_clock::now();
     if (!engine.Start(options, &error)) {
         Die("engine start failed: " + error);
     }
+    const auto start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - start_at)
+                              .count();
+    if (first_deploy && start_ms > 3000) {
+        Die("first-run Start blocked the caller for " + std::to_string(start_ms) +
+            " ms");
+    }
+    if (engine.IsDeploying()) {
+        std::cout << "ok: Start returned in " << start_ms
+                  << " ms while deploying\n";
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(180);
+        while (engine.IsDeploying()) {
+            if (std::chrono::steady_clock::now() > deadline) {
+                Die("background deploy timed out");
+            }
+            if (engine.PollMaintenance(&error)) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
+    if (!engine.IsHealthy()) {
+        Die("engine was not healthy after deploy: " + error);
+    }
+    std::cout << "ok: engine ready after async deploy (" << start_ms << " ms to return)\n";
 
     const auto session = engine.CreateSession(&error);
     if (session == 0) {
