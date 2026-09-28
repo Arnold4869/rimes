@@ -2,7 +2,6 @@
 
 #include <filesystem>
 
-#include <fcitx-utils/event.h>
 #include <fcitx-utils/log.h>
 #include <fcitx/inputcontextmanager.h>
 #include <fcitx/userinterface.h>
@@ -24,8 +23,21 @@ FCITX_DEFINE_LOG_CATEGORY(rimes_log, "rimes");
 
 RimesIme::RimesIme(Instance* instance)
     : instance_(instance),
-      factory_([this](InputContext& ic) { return new RimesState(this, &ic); }) {
+      factory_([this](InputContext& ic) { return new RimesState(this, &ic); }),
+      alive_(std::make_shared<std::atomic<bool>>(true)) {
     instance_->inputContextManager().registerProperty("rimesState", &factory_);
+    dispatcher_.attach(&instance_->eventLoop());
+
+    // fcitx5 time events are one-shot (sd_event / libuv). A setTime() poll
+    // without setOneShot() fires once at +200 ms and never again — that left
+    // status stuck on "Deploying". Notify from the maintenance thread instead.
+    engine_.SetDeployReadyCallback([this, alive = alive_]() {
+        dispatcher_.schedule([this, alive]() {
+            if (alive && alive->load()) {
+                HandleDeployReady();
+            }
+        });
+    });
 
     auto paths = rimes::linuxime::ResolveEnginePaths(
         std::filesystem::path(RIMES_INSTALL_SHARED_DIR));
@@ -39,28 +51,37 @@ RimesIme::RimesIme(Instance* instance)
     if (!engine_.Start(options, &error)) {
         FCITX_LOGC(rimes_log, Error) << "librime start failed: " << error;
     } else if (engine_.IsDeploying()) {
-        FCITX_LOGC(rimes_log, Info) << "librime first-run deploy started in the background";
-        StartDeployWatch();
+        FCITX_LOGC(rimes_log, Info)
+            << "librime background deploy started; keys pass through until ready";
     }
 }
 
-RimesIme::~RimesIme() { deploy_timer_.reset(); }
+RimesIme::~RimesIme() {
+    if (alive_) {
+        alive_->store(false);
+    }
+    engine_.SetDeployReadyCallback(nullptr);
+    engine_.Stop();
+    dispatcher_.detach();
+}
 
-void RimesIme::StartDeployWatch() {
-    deploy_timer_ = instance_->eventLoop().addTimeEvent(
-        CLOCK_MONOTONIC, now(CLOCK_MONOTONIC) + 200000, 200000,
-        [this](EventSourceTime* source, uint64_t) {
-            if (engine_.PollMaintenance()) {
-                source->setEnabled(false);
-                OnDeployReady();
-                return true;
-            }
-            source->setTime(now(CLOCK_MONOTONIC) + 200000);
-            return true;
-        });
+void RimesIme::HandleDeployReady() {
+    std::string error;
+    if (!engine_.PollMaintenance(&error)) {
+        if (engine_.IsDeploying()) {
+            return;
+        }
+        FCITX_LOGC(rimes_log, Error) << "librime deploy failed: " << error;
+        return;
+    }
+    OnDeployReady();
 }
 
 void RimesIme::OnDeployReady() {
+    if (deploy_announced_) {
+        return;
+    }
+    deploy_announced_ = true;
     FCITX_LOGC(rimes_log, Info) << "librime deploy finished";
     instance_->inputContextManager().foreachFocused([this](InputContext* ic) {
         if (instance_->inputMethod(ic) == "rimes") {

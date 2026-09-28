@@ -42,7 +42,11 @@ For each host above:
    visible preedit (`ni hao`), not `ni hao你好`. No stuck preedit.
 10. First-run deploy: `rm -rf ~/.local/share/rimes`, restart fcitx5 with RIMES
     in the profile, type immediately. Other IMs and `fcitx5-remote` must stay
-    responsive. Status may show `Deploying` until dictionaries finish.
+    responsive. Status may show `Deploying` until dictionaries finish. After
+    CPU goes flat, the log must show `librime deploy finished`, status must
+    leave `Deploying`, and `nihao` + Space must commit `你好` **without**
+    restarting fcitx5. A later restart that triggers a short rebuild must
+    behave the same — RIMES must not stay stuck on `Deploying` for the session.
 
 ## Session / compositor notes
 

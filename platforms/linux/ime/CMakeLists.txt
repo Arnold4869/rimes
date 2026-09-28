@@ -15,6 +15,7 @@ include(GNUInstallDirs)
 include(CTest)
 
 find_package(PkgConfig REQUIRED)
+find_package(Threads REQUIRED)
 pkg_check_modules(Rime REQUIRED IMPORTED_TARGET rime>=1.7.0)
 
 function(rimes_harden target)
@@ -36,7 +37,7 @@ add_library(RimesEngine STATIC
 target_include_directories(RimesEngine PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
-target_link_libraries(RimesEngine PUBLIC PkgConfig::Rime)
+target_link_libraries(RimesEngine PUBLIC PkgConfig::Rime Threads::Threads)
 set_target_properties(RimesEngine PROPERTIES POSITION_INDEPENDENT_CODE ON)
 rimes_harden(RimesEngine)
 

@@ -1,15 +1,21 @@
+#include <chrono>
 #include <cstdlib>
+#include <exception>
+#include <filesystem>
 #include <iostream>
+#include <memory>
 #include <string>
-#include <vector>
+#include <unistd.h>
 
 #include <fcitx-utils/capabilityflags.h>
+#include <fcitx-utils/event.h>
 #include <fcitx-utils/eventdispatcher.h>
 #include <fcitx-utils/key.h>
 #include <fcitx-utils/testing.h>
 #include <fcitx/addonmanager.h>
 #include <fcitx/candidatelist.h>
 #include <fcitx/inputcontextmanager.h>
+#include <fcitx/inputmethodengine.h>
 #include <fcitx/inputmethodgroup.h>
 #include <fcitx/inputmethodmanager.h>
 #include <fcitx/inputpanel.h>
@@ -31,6 +37,105 @@ void Type(fcitx::AddonInstance* frontend, const fcitx::ICUUID& uuid, const char*
     }
 }
 
+void IsolateEmptyUserDir() {
+    const auto user = std::filesystem::temp_directory_path() /
+                      ("rimes-fcitx-e2e-user-" + std::to_string(getpid()));
+    std::error_code error;
+    std::filesystem::remove_all(user, error);
+    std::filesystem::create_directories(user / "log", error);
+    if (error) {
+        Die("could not create isolated user dir: " + error.message());
+    }
+    setenv("RIMES_USER_DIR", user.string().c_str(), 1);
+    setenv("RIMES_LOG_DIR", (user / "log").string().c_str(), 1);
+}
+
+void RunTypingSuite(fcitx::Instance& instance,
+                    fcitx::AddonInstance* frontend,
+                    const fcitx::ICUUID& uuid,
+                    fcitx::InputContext* ic) {
+    ic->setCapabilityFlags(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit} |
+                           fcitx::CapabilityFlag::ClientUnfocusCommit);
+
+    frontend->call<fcitx::ITestFrontend::pushCommitExpectation>("你好");
+    Type(frontend, uuid, "nihao");
+    if (ic->inputPanel().clientPreedit().empty()) {
+        Die("nihao produced no inline preedit");
+    }
+    if (!ic->inputPanel().preedit().empty()) {
+        Die("inline-capable client also showed preedit in the popup");
+    }
+    auto candidates = ic->inputPanel().candidateList();
+    if (!candidates || candidates->size() < 1) {
+        Die("nihao produced no candidate list");
+    }
+    bool saw_nihao = false;
+    for (int index = 0; index < candidates->size(); ++index) {
+        if (candidates->candidate(index).text().toStringForCommit() == "你好") {
+            saw_nihao = true;
+        }
+    }
+    if (!saw_nihao) {
+        Die("candidate page after nihao did not include 你好");
+    }
+    frontend->call<fcitx::ITestFrontend::keyEvent>(uuid, fcitx::Key("space"), false);
+    frontend->call<fcitx::ITestFrontend::keyEvent>(uuid, fcitx::Key("space"), true);
+    std::cout << "ok: testfrontend nihao + Space\n";
+
+    Type(frontend, uuid, "ni");
+    candidates = ic->inputPanel().candidateList();
+    if (!candidates || candidates->size() < 2) {
+        Die("expected at least two candidates after typing ni");
+    }
+    const std::string second = candidates->candidate(1).text().toStringForCommit();
+    frontend->call<fcitx::ITestFrontend::pushCommitExpectation>(second);
+    frontend->call<fcitx::ITestFrontend::keyEvent>(uuid, fcitx::Key("2"), false);
+    frontend->call<fcitx::ITestFrontend::keyEvent>(uuid, fcitx::Key("2"), true);
+    std::cout << "ok: testfrontend number selection\n";
+
+    Type(frontend, uuid, "a");
+    candidates = ic->inputPanel().candidateList();
+    if (!candidates || candidates->empty()) {
+        Die("expected candidates before paging");
+    }
+    const std::string first_page = candidates->candidate(0).text().toStringForCommit();
+    frontend->call<fcitx::ITestFrontend::keyEvent>(uuid, fcitx::Key("Page_Down"), false);
+    frontend->call<fcitx::ITestFrontend::keyEvent>(uuid, fcitx::Key("Page_Down"), true);
+    candidates = ic->inputPanel().candidateList();
+    if (!candidates || candidates->empty()) {
+        Die("page down cleared the candidate list");
+    }
+    const std::string paged = candidates->candidate(0).text().toStringForCommit();
+    auto* pageable = candidates->toPageable();
+    if (paged == first_page &&
+        (pageable == nullptr || (!pageable->hasNext() && !pageable->hasPrev()))) {
+        Die("page down left a single unpageable list");
+    }
+    frontend->call<fcitx::ITestFrontend::keyEvent>(uuid, fcitx::Key("Escape"), false);
+    frontend->call<fcitx::ITestFrontend::keyEvent>(uuid, fcitx::Key("Escape"), true);
+    std::cout << "ok: testfrontend paging\n";
+
+    Type(frontend, uuid, "nihao");
+    frontend->call<fcitx::ITestFrontend::keyEvent>(uuid, fcitx::Key("Escape"), false);
+    frontend->call<fcitx::ITestFrontend::keyEvent>(uuid, fcitx::Key("Escape"), true);
+    std::cout << "ok: testfrontend Escape\n";
+
+    Type(frontend, uuid, "nihao");
+    if (ic->inputPanel().clientPreedit().empty()) {
+        Die("expected inline preedit before focus-out");
+    }
+    ic->focusOut();
+    ic->focusIn();
+    if (!ic->inputPanel().clientPreedit().empty() ||
+        !ic->inputPanel().preedit().empty()) {
+        Die("focus-out left a leftover preedit");
+    }
+    std::cout << "ok: testfrontend focus-out did not commit\n";
+
+    frontend->call<fcitx::ITestFrontend::destroyInputContext>(uuid);
+    instance.exit();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -38,6 +143,9 @@ int main(int argc, char** argv) {
         std::cerr << "Usage: rimes-fcitx-e2e <build-dir> <addon-rel-dir> <data-rel-dir>\n";
         return EXIT_FAILURE;
     }
+
+    // Empty user dir so the addon takes the async first-run deploy path.
+    IsolateEmptyUserDir();
 
     fcitx::setupTestingEnvironment(argv[1], {argv[2]}, {argv[3]});
 
@@ -50,7 +158,15 @@ int main(int argc, char** argv) {
 
     fcitx::EventDispatcher dispatcher;
     dispatcher.attach(&instance.eventLoop());
-    dispatcher.schedule([&instance]() {
+
+    fcitx::AddonInstance* frontend = nullptr;
+    fcitx::ICUUID uuid{};
+    fcitx::InputContext* ic = nullptr;
+    std::unique_ptr<fcitx::EventSourceTime> wait_timer;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(180);
+    bool suite_started = false;
+
+    dispatcher.schedule([&]() {
         auto& manager = instance.inputMethodManager();
         if (manager.entry("rimes") == nullptr) {
             Die("input method 'rimes' was not registered");
@@ -66,12 +182,12 @@ int main(int argc, char** argv) {
         manager.setGroup(group);
         manager.setCurrentGroup("Default");
 
-        auto* frontend = instance.addonManager().addon("testfrontend", true);
+        frontend = instance.addonManager().addon("testfrontend", true);
         if (frontend == nullptr) {
             Die("testfrontend addon did not load");
         }
-        const auto uuid = frontend->call<fcitx::ITestFrontend::createInputContext>("rimes-e2e");
-        auto* ic = instance.inputContextManager().findByUUID(uuid);
+        uuid = frontend->call<fcitx::ITestFrontend::createInputContext>("rimes-e2e");
+        ic = instance.inputContextManager().findByUUID(uuid);
         if (ic == nullptr) {
             Die("test input context was not created");
         }
@@ -79,93 +195,32 @@ int main(int argc, char** argv) {
         if (instance.inputMethod(ic) != "rimes") {
             Die("could not switch the test context to rimes");
         }
-        ic->setCapabilityFlags(fcitx::CapabilityFlags{fcitx::CapabilityFlag::Preedit} |
-                               fcitx::CapabilityFlag::ClientUnfocusCommit);
 
-        frontend->call<fcitx::ITestFrontend::pushCommitExpectation>("你好");
-        Type(frontend, uuid, "nihao");
-        if (ic->inputPanel().clientPreedit().empty()) {
-            Die("nihao produced no inline preedit");
-        }
-        if (!ic->inputPanel().preedit().empty()) {
-            Die("inline-capable client also showed preedit in the popup");
-        }
-        auto candidates = ic->inputPanel().candidateList();
-        if (!candidates || candidates->size() < 1) {
-            Die("nihao produced no candidate list");
-        }
-        bool saw_nihao = false;
-        for (int index = 0; index < candidates->size(); ++index) {
-            if (candidates->candidate(index).text().toStringForCommit() == "你好") {
-                saw_nihao = true;
-            }
-        }
-        if (!saw_nihao) {
-            Die("candidate page after nihao did not include 你好");
-        }
-        frontend->call<fcitx::ITestFrontend::keyEvent>(uuid, fcitx::Key("space"), false);
-        frontend->call<fcitx::ITestFrontend::keyEvent>(uuid, fcitx::Key("space"), true);
-        std::cout << "ok: testfrontend nihao + Space\n";
-
-        Type(frontend, uuid, "ni");
-        candidates = ic->inputPanel().candidateList();
-        if (!candidates || candidates->size() < 2) {
-            Die("expected at least two candidates after typing ni");
-        }
-        const std::string second = candidates->candidate(1).text().toStringForCommit();
-        frontend->call<fcitx::ITestFrontend::pushCommitExpectation>(second);
-        frontend->call<fcitx::ITestFrontend::keyEvent>(uuid, fcitx::Key("2"), false);
-        frontend->call<fcitx::ITestFrontend::keyEvent>(uuid, fcitx::Key("2"), true);
-        std::cout << "ok: testfrontend number selection\n";
-
-        Type(frontend, uuid, "a");
-        candidates = ic->inputPanel().candidateList();
-        if (!candidates || candidates->empty()) {
-            Die("expected candidates before paging");
-        }
-        const std::string first_page = candidates->candidate(0).text().toStringForCommit();
-        frontend->call<fcitx::ITestFrontend::keyEvent>(uuid, fcitx::Key("Page_Down"), false);
-        frontend->call<fcitx::ITestFrontend::keyEvent>(uuid, fcitx::Key("Page_Down"), true);
-        candidates = ic->inputPanel().candidateList();
-        if (!candidates || candidates->empty()) {
-            Die("page down cleared the candidate list");
-        }
-        const std::string paged = candidates->candidate(0).text().toStringForCommit();
-        auto* pageable = candidates->toPageable();
-        if (paged == first_page &&
-            (pageable == nullptr || (!pageable->hasNext() && !pageable->hasPrev()))) {
-            Die("page down left a single unpageable list");
-        }
-        frontend->call<fcitx::ITestFrontend::keyEvent>(uuid, fcitx::Key("Escape"), false);
-        frontend->call<fcitx::ITestFrontend::keyEvent>(uuid, fcitx::Key("Escape"), true);
-        std::cout << "ok: testfrontend paging\n";
-
-        // Escape must clear composition. testfrontend fatals on any commit that
-        // was not pushed, so this also asserts that Escape does not commit.
-        Type(frontend, uuid, "nihao");
-        frontend->call<fcitx::ITestFrontend::keyEvent>(uuid, fcitx::Key("Escape"), false);
-        frontend->call<fcitx::ITestFrontend::keyEvent>(uuid, fcitx::Key("Escape"), true);
-        std::cout << "ok: testfrontend Escape\n";
-
-        // Focus-out must not commit again. testfrontend fatals on any commit
-        // that was not pushed, so this also asserts no double commit.
-        Type(frontend, uuid, "nihao");
-        if (ic->inputPanel().clientPreedit().empty()) {
-            Die("expected inline preedit before focus-out");
-        }
-        // No commit expectation: a leftover 你好 from CommitComposition on
-        // focus-out would fatal in testfrontend. The visible client preedit
-        // is the frontend's job (GTK leaves "ni hao").
-        ic->focusOut();
-        ic->focusIn();
-        if (!ic->inputPanel().clientPreedit().empty() ||
-            !ic->inputPanel().preedit().empty()) {
-            Die("focus-out left a leftover preedit");
-        }
-        std::cout << "ok: testfrontend focus-out did not commit\n";
-
-        frontend->call<fcitx::ITestFrontend::destroyInputContext>(uuid);
-        instance.exit();
+        // Yield back to the event loop so the addon's EventDispatcher can
+        // receive the maintenance-thread notify. A one-shot timer that only
+        // called setTime() would miss that — re-arm with setOneShot().
+        wait_timer = instance.eventLoop().addTimeEvent(
+            CLOCK_MONOTONIC, fcitx::now(CLOCK_MONOTONIC) + 50000, 50000,
+            [&](fcitx::EventSourceTime* source, uint64_t) {
+                if (std::chrono::steady_clock::now() > deadline) {
+                    Die("addon stayed in Deploying; deploy-ready notify never ran");
+                }
+                auto* ime = instance.inputMethodEngine(ic);
+                const auto* entry = instance.inputMethodEntry(ic);
+                if (ime != nullptr && entry != nullptr &&
+                    ime->subMode(*entry, *ic) == "Deploying") {
+                    source->setTime(fcitx::now(CLOCK_MONOTONIC) + 200000);
+                    source->setOneShot();
+                    return true;
+                }
+                if (suite_started) {
+                    return true;
+                }
+                suite_started = true;
+                std::cout << "ok: testfrontend left Deploying after background deploy\n";
+                RunTypingSuite(instance, frontend, uuid, ic);
+                return true;
+            });
     });
 
     try {

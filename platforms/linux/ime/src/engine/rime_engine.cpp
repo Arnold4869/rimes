@@ -1,6 +1,8 @@
 #include "rime_engine.hpp"
 
+#include <cstring>
 #include <mutex>
+#include <thread>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -80,6 +82,9 @@ public:
             api_->setup(&traits);
             api_->initialize(&traits);
             initialized_ = true;
+            if (api_->set_notification_handler != nullptr) {
+                api_->set_notification_handler(&Impl::OnRimeNotification, this);
+            }
 
             const bool full_check =
                 options.full_maintenance_check ||
@@ -109,10 +114,26 @@ public:
 
     void Stop() noexcept {
         try {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                watch_stop_ = true;
+            }
+            {
+                std::lock_guard<std::mutex> lock(callback_mutex_);
+                deploy_ready_ = nullptr;
+            }
+            if (watch_thread_.joinable()) {
+                watch_thread_.join();
+            }
             std::lock_guard<std::mutex> lock(mutex_);
             StopLocked();
         } catch (...) {
         }
+    }
+
+    void SetDeployReadyCallback(RimeEngine::DeployReadyCallback callback) {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        deploy_ready_ = std::move(callback);
     }
 
     bool IsHealthy() const noexcept {
@@ -146,8 +167,11 @@ public:
             if (api_->is_maintenance_mode != nullptr && api_->is_maintenance_mode() != 0) {
                 return false;
             }
-            if (api_->join_maintenance_thread != nullptr) {
+            // A live watcher already called (or is calling) join. Do not join
+            // from the UI thread — that is the freeze we are avoiding.
+            if (!async_watch_started_ && api_->join_maintenance_thread != nullptr) {
                 api_->join_maintenance_thread();
+                watch_joined_maintenance_ = true;
             }
             deploying_ = false;
             return FinishReadyLocked(error);
@@ -405,6 +429,7 @@ private:
         if (!wait) {
             deploying_ = true;
             healthy_ = false;
+            StartWatchLocked();
             return true;
         }
         if (api_->join_maintenance_thread == nullptr) {
@@ -542,6 +567,78 @@ private:
         return true;
     }
 
+    void StartWatchLocked() noexcept {
+        if (watch_thread_.joinable()) {
+            return;
+        }
+        watch_stop_ = false;
+        async_watch_started_ = true;
+        watch_joined_maintenance_ = false;
+        try {
+            watch_thread_ = std::thread([this] { WatchMaintenance(); });
+        } catch (...) {
+            async_watch_started_ = false;
+        }
+    }
+
+    void WatchMaintenance() noexcept {
+        RimeApi* api = nullptr;
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            api = api_;
+        } catch (...) {
+            return;
+        }
+        if (api != nullptr && api->join_maintenance_thread != nullptr) {
+            api->join_maintenance_thread();
+        }
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            watch_joined_maintenance_ = true;
+            if (watch_stop_) {
+                return;
+            }
+        } catch (...) {
+            return;
+        }
+        NotifyDeployReady();
+    }
+
+    void NotifyDeployReady() noexcept {
+        // Do not coalesce: deploy/success can fire before
+        // is_maintenance_mode() clears. The join watcher notifies again.
+        RimeEngine::DeployReadyCallback callback;
+        try {
+            std::lock_guard<std::mutex> lock(callback_mutex_);
+            callback = deploy_ready_;
+        } catch (...) {
+            return;
+        }
+        if (callback) {
+            try {
+                callback();
+            } catch (...) {
+            }
+        }
+    }
+
+    static void OnRimeNotification(void* context,
+                                   RimeSessionId,
+                                   const char* message_type,
+                                   const char* message_value) {
+        auto* self = static_cast<Impl*>(context);
+        if (self == nullptr || message_type == nullptr || message_value == nullptr) {
+            return;
+        }
+        if (std::strcmp(message_type, "deploy") != 0) {
+            return;
+        }
+        if (std::strcmp(message_value, "success") == 0 ||
+            std::strcmp(message_value, "failure") == 0) {
+            self->NotifyDeployReady();
+        }
+    }
+
     void StopLocked() noexcept {
         healthy_ = false;
         if (api_ != nullptr) {
@@ -549,11 +646,16 @@ private:
                 api_->destroy_session(session);
             }
             sessions_.clear();
+            if (initialized_ && api_->set_notification_handler != nullptr) {
+                api_->set_notification_handler(nullptr, nullptr);
+            }
             if (initialized_ && api_->join_maintenance_thread != nullptr &&
+                !watch_joined_maintenance_ &&
                 (deploying_ ||
                  (api_->is_maintenance_mode != nullptr &&
                   api_->is_maintenance_mode() != 0))) {
                 api_->join_maintenance_thread();
+                watch_joined_maintenance_ = true;
             }
             if (initialized_ && api_->finalize != nullptr) {
                 api_->finalize();
@@ -561,6 +663,8 @@ private:
         }
         deploying_ = false;
         initialized_ = false;
+        async_watch_started_ = false;
+        watch_joined_maintenance_ = false;
         api_ = nullptr;
         shared_data_dir_.clear();
         user_data_dir_.clear();
@@ -569,10 +673,16 @@ private:
     }
 
     mutable std::mutex mutex_;
+    std::mutex callback_mutex_;
     RimeApi* api_ = nullptr;
     bool initialized_ = false;
     bool healthy_ = false;
     bool deploying_ = false;
+    bool watch_stop_ = false;
+    bool async_watch_started_ = false;
+    bool watch_joined_maintenance_ = false;
+    std::thread watch_thread_;
+    RimeEngine::DeployReadyCallback deploy_ready_;
     std::string shared_data_dir_;
     std::string user_data_dir_;
     std::string log_dir_;
@@ -590,6 +700,10 @@ bool RimeEngine::Start(const RimeEngineOptions& options, std::string* error) noe
 }
 
 void RimeEngine::Stop() noexcept { impl_->Stop(); }
+
+void RimeEngine::SetDeployReadyCallback(DeployReadyCallback callback) {
+    impl_->SetDeployReadyCallback(std::move(callback));
+}
 
 bool RimeEngine::IsHealthy() const noexcept { return impl_->IsHealthy(); }
 

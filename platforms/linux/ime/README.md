@@ -17,8 +17,10 @@ in later.
 - Number keys 1–9 select the current page
 - Page Up / Page Down
 - Escape cancels composition without committing
-- First-run dictionary deploy runs in the background; Fcitx5 stays responsive
-  and keys pass through until librime is ready (`subMode` shows `Deploying`)
+- First-run (and later rebuild) dictionary deploy runs in the background;
+  Fcitx5 stays responsive and keys pass through until librime is ready
+  (`subMode` shows `Deploying`). The maintenance thread notifies the Fcitx5
+  event loop when deploy finishes — status leaves `Deploying` without a restart.
 - Isolated user directory: `$XDG_DATA_HOME/rimes` (not `…/fcitx5/rime`)
 - Shared data: `$prefix/share/rimes/data` (policy-staged 55-file closure)
 

@@ -3,17 +3,43 @@
 #include "engine/rime_paths.hpp"
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <mutex>
 #include <string>
-#include <thread>
 
 namespace {
 
 void Die(const std::string& message) {
     std::cerr << "FAIL: " << message << '\n';
     std::exit(EXIT_FAILURE);
+}
+
+void FinishAsyncDeploy(rimes::linuxime::RimeEngine& engine,
+                       std::mutex& mutex,
+                       std::condition_variable& ready_cv,
+                       bool& notified,
+                       const char* label) {
+    // deploy/success can notify before is_maintenance_mode() clears. Keep
+    // waiting through later watcher notifies until PollMaintenance succeeds.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(180);
+    std::string error;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (engine.PollMaintenance(&error)) {
+            if (engine.IsDeploying()) {
+                Die(std::string(label) + ": engine stayed in deploying after ready");
+            }
+            return;
+        }
+        std::unique_lock<std::mutex> lock(mutex);
+        ready_cv.wait_for(lock, std::chrono::milliseconds(200),
+                          [&]() { return notified; });
+        notified = false;
+    }
+    Die(std::string(label) + ": deploy-ready notify never made the engine usable: " +
+        error);
 }
 
 void TypeAscii(rimes::linuxime::RimeEngine& engine,
@@ -58,6 +84,15 @@ int main(int argc, char** argv) {
     const bool first_deploy =
         !std::filesystem::exists(options.user_data_dir / "build");
     rimes::linuxime::RimeEngine engine;
+    bool notified = false;
+    std::mutex notify_mutex;
+    std::condition_variable notify_cv;
+    engine.SetDeployReadyCallback([&]() {
+        std::lock_guard<std::mutex> lock(notify_mutex);
+        notified = true;
+        notify_cv.notify_all();
+    });
+
     const auto start_at = std::chrono::steady_clock::now();
     if (!engine.Start(options, &error)) {
         Die("engine start failed: " + error);
@@ -72,20 +107,8 @@ int main(int argc, char** argv) {
     if (engine.IsDeploying()) {
         std::cout << "ok: Start returned in " << start_ms
                   << " ms while deploying\n";
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(180);
-        while (engine.IsDeploying()) {
-            if (std::chrono::steady_clock::now() > deadline) {
-                Die("background deploy timed out");
-            }
-            if (engine.PollMaintenance(&error)) {
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
     }
-    if (!engine.IsHealthy()) {
-        Die("engine was not healthy after deploy: " + error);
-    }
+    FinishAsyncDeploy(engine, notify_mutex, notify_cv, notified, "first-run");
     std::cout << "ok: engine ready after async deploy (" << start_ms << " ms to return)\n";
 
     const auto session = engine.CreateSession(&error);
@@ -177,7 +200,46 @@ int main(int argc, char** argv) {
     std::cout << "ok: Escape cancels\n";
 
     engine.DestroySession(session, &error);
+    engine.SetDeployReadyCallback(nullptr);
     engine.Stop();
+
+    // Later fcitx5 starts can still run a short rebuild. That must also notify
+    // and become usable without a second process restart.
+    notified = false;
+    engine.SetDeployReadyCallback([&]() {
+        std::lock_guard<std::mutex> lock(notify_mutex);
+        notified = true;
+        notify_cv.notify_all();
+    });
+    options.full_maintenance_check = true;
+    const auto rebuild_at = std::chrono::steady_clock::now();
+    if (!engine.Start(options, &error)) {
+        Die("rebuild start failed: " + error);
+    }
+    const auto rebuild_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - rebuild_at)
+                                .count();
+    if (rebuild_ms > 3000) {
+        Die("rebuild Start blocked the caller for " + std::to_string(rebuild_ms) +
+            " ms");
+    }
+    FinishAsyncDeploy(engine, notify_mutex, notify_cv, notified, "rebuild");
+    const auto rebuilt = engine.CreateSession(&error);
+    if (rebuilt == 0) {
+        Die("session create failed after rebuild: " + error);
+    }
+    TypeAscii(engine, rebuilt, "nihao", &snapshot);
+    if (!engine.ProcessKey(rebuilt, rimes::linuxime::kSpace, 0, &snapshot, &error)) {
+        Die("rebuild space failed: " + error);
+    }
+    if (snapshot.commit_text != "你好") {
+        Die("rebuild expected commit 你好, got '" + snapshot.commit_text + "'");
+    }
+    engine.DestroySession(rebuilt, &error);
+    engine.Stop();
+    std::cout << "ok: restart-triggered rebuild became usable (" << rebuild_ms
+              << " ms to return)\n";
+
     std::cout << "RIMES engine smoke passed\n";
     return EXIT_SUCCESS;
 }

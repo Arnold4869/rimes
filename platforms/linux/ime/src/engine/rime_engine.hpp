@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -32,14 +33,20 @@ public:
     RimeEngine(const RimeEngine&) = delete;
     RimeEngine& operator=(const RimeEngine&) = delete;
 
+    using DeployReadyCallback = std::function<void()>;
+
     bool Start(const RimeEngineOptions& options, std::string* error = nullptr) noexcept;
     void Stop() noexcept;
     [[nodiscard]] bool IsHealthy() const noexcept;
     [[nodiscard]] bool IsDeploying() const noexcept;
 
+    // Invoked from the librime maintenance thread or the join watcher, not
+    // the Fcitx5 main thread. The addon must bounce to EventDispatcher.
+    void SetDeployReadyCallback(DeployReadyCallback callback);
+
     // Returns true once maintenance has finished and the engine is healthy.
-    // Safe to call from the Fcitx5 main thread: it never joins while librime
-    // is still compiling dictionaries.
+    // Safe to call from the Fcitx5 main thread: it never joins while a
+    // background watcher already owns join_maintenance_thread.
     bool PollMaintenance(std::string* error = nullptr) noexcept;
 
     bool RunMaintenance(bool full_check, std::string* error = nullptr) noexcept;

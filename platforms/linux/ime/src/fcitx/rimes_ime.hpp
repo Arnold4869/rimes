@@ -1,8 +1,9 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 
-#include <fcitx-utils/event.h>
+#include <fcitx-utils/eventdispatcher.h>
 #include <fcitx/addonfactory.h>
 #include <fcitx/addoninstance.h>
 #include <fcitx/addonmanager.h>
@@ -37,13 +38,15 @@ public:
     void applySnapshot(InputContext* ic, const rimes::linuxime::EngineSnapshot& snapshot);
 
 private:
-    void StartDeployWatch();
+    void HandleDeployReady();
     void OnDeployReady();
 
     Instance* instance_;
     rimes::linuxime::RimeEngine engine_;
     FactoryFor<RimesState> factory_;
-    std::unique_ptr<EventSourceTime> deploy_timer_;
+    EventDispatcher dispatcher_;
+    std::shared_ptr<std::atomic<bool>> alive_;
+    bool deploy_announced_ = false;
 };
 
 class RimesImeFactory : public AddonFactory {
