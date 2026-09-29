@@ -49,19 +49,38 @@ jobs:
           platforms/ios/scripts/test-simulator.sh
       - name: Verify resources
         run: python3 platforms/ios/scripts/verify.py
+      - name: Build signing-free Release device app
+        run: |
+          xcodebuild -project platforms/ios/RIMES.xcodeproj -scheme RIMES -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath platforms/ios/build/ReleaseDeviceDerivedData \
+            CODE_SIGNING_ALLOWED=NO build
       - name: Package unsigned IPA
         run: |
-          APP=$(find platforms/ios/build/DeviceDerivedData/Build/Products -type d -name 'RIMES.app' | head -n 1)
+          APP=$(find platforms/ios/build/ReleaseDeviceDerivedData/Build/Products -type d -name 'RIMES.app' | head -n 1)
           test -n "$APP" || { echo 'RIMES.app not found in device build products'; exit 1; }
           VER="1.0.${GITHUB_RUN_NUMBER}"
           mkdir -p platforms/ios/build/ipa/Payload
           cp -R "$APP" platforms/ios/build/ipa/Payload/RIMES.app
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VER" platforms/ios/build/ipa/Payload/RIMES.app/Info.plist
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VER" platforms/ios/build/ipa/Payload/RIMES.app/Info.plist
+          for PL in platforms/ios/build/ipa/Payload/RIMES.app/Info.plist \
+                    platforms/ios/build/ipa/Payload/RIMES.app/PlugIns/RIMESKeyboard.appex/Info.plist; do
+            [ -f "$PL" ] || continue
+            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VER" "$PL"
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VER" "$PL"
+          done
           (cd platforms/ios/build/ipa && zip -qry "RIMES-${VER}-unsigned.ipa" Payload)
+          # Verify the artifact, not just the build: a Debug device build carries the
+          # code in RIMES.debug.dylib behind a ~70 KB stub, which sideloads badly.
+          test -f platforms/ios/build/ipa/Payload/RIMES.app/PlugIns/RIMESKeyboard.appex/Info.plist \
+            || { echo 'keyboard appex missing from IPA'; exit 1; }
+          test ! -e platforms/ios/build/ipa/Payload/RIMES.app/RIMES.debug.dylib \
+            || { echo 'unexpected debug dylib in Release build'; exit 1; }
+          SIZE=$(/usr/bin/stat -f%z platforms/ios/build/ipa/Payload/RIMES.app/RIMES)
+          echo "main binary: $SIZE bytes"
+          [ "$SIZE" -gt 1000000 ] || { echo 'main binary too small for a Release build'; exit 1; }
           /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' platforms/ios/build/ipa/Payload/RIMES.app/Info.plist
-          /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' platforms/ios/build/ipa/Payload/RIMES.app/Info.plist
-          ls -lh platforms/ios/build/ipa/*.ipa
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' platforms/ios/build/ipa/Payload/RIMES.app/PlugIns/RIMESKeyboard.appex/Info.plist
+          /usr/bin/unzip -l platforms/ios/build/ipa/*.ipa | tail -n 3
       - name: Upload unsigned IPA artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
