@@ -51,6 +51,11 @@ public:
 
     bool RunMaintenance(bool full_check, std::string* error = nullptr) noexcept;
 
+    // start_maintenance without joining. Same path a later fcitx5 start uses
+    // when librime decides to rebuild. Sessions must be closed first.
+    bool StartBackgroundMaintenance(bool full_check,
+                                    std::string* error = nullptr) noexcept;
+
     SessionId CreateSession(std::string* error = nullptr) noexcept;
     bool DestroySession(SessionId session, std::string* error = nullptr) noexcept;
 

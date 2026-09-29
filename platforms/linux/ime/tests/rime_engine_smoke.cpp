@@ -200,28 +200,34 @@ int main(int argc, char** argv) {
     std::cout << "ok: Escape cancels\n";
 
     engine.DestroySession(session, &error);
-    engine.SetDeployReadyCallback(nullptr);
-    engine.Stop();
 
-    // Later fcitx5 starts can still run a short rebuild. That must also notify
-    // and become usable without a second process restart.
+    // Later fcitx5 starts can still run a short rebuild. Dropping build/
+    // forces librime to compile again — same stuck-Deploying failure mode.
+    std::error_code remove_error;
+    std::filesystem::remove_all(options.user_data_dir / "build", remove_error);
+    if (remove_error) {
+        Die("could not clear build/ for rebuild: " + remove_error.message());
+    }
+
     notified = false;
     engine.SetDeployReadyCallback([&]() {
         std::lock_guard<std::mutex> lock(notify_mutex);
         notified = true;
         notify_cv.notify_all();
     });
-    options.full_maintenance_check = true;
     const auto rebuild_at = std::chrono::steady_clock::now();
-    if (!engine.Start(options, &error)) {
+    if (!engine.StartBackgroundMaintenance(true, &error)) {
         Die("rebuild start failed: " + error);
     }
     const auto rebuild_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                 std::chrono::steady_clock::now() - rebuild_at)
                                 .count();
     if (rebuild_ms > 3000) {
-        Die("rebuild Start blocked the caller for " + std::to_string(rebuild_ms) +
-            " ms");
+        Die("rebuild StartBackgroundMaintenance blocked the caller for " +
+            std::to_string(rebuild_ms) + " ms");
+    }
+    if (!engine.IsDeploying()) {
+        Die("deleting build/ did not start a background rebuild");
     }
     FinishAsyncDeploy(engine, notify_mutex, notify_cv, notified, "rebuild");
     const auto rebuilt = engine.CreateSession(&error);

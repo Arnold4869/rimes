@@ -79,7 +79,13 @@ public:
             traits.min_log_level = 2;
             traits.log_dir = log_dir_.c_str();
 
-            api_->setup(&traits);
+            // setup() initializes glog. A second call in this process aborts
+            // ("You called InitGoogleLogging() twice") after Stop()+Start().
+            static bool setup_done = false;
+            if (!setup_done) {
+                api_->setup(&traits);
+                setup_done = true;
+            }
             api_->initialize(&traits);
             initialized_ = true;
             if (api_->set_notification_handler != nullptr) {
@@ -182,9 +188,17 @@ public:
     }
 
     bool RunMaintenance(bool full_check, std::string* error) noexcept {
+        return StartMaintenance(full_check, true, error);
+    }
+
+    bool StartBackgroundMaintenance(bool full_check, std::string* error) noexcept {
+        return StartMaintenance(full_check, false, error);
+    }
+
+    bool StartMaintenance(bool full_check, bool wait, std::string* error) noexcept {
         try {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!healthy_ && !initialized_) {
+            if (!initialized_ || api_ == nullptr) {
                 SetError(error, "librime is not initialized");
                 return false;
             }
@@ -192,7 +206,13 @@ public:
                 SetError(error, "librime maintenance requires all sessions to close");
                 return false;
             }
-            return RunMaintenanceLocked(full_check, true, error);
+            if (!RunMaintenanceLocked(full_check, wait, error)) {
+                return false;
+            }
+            if (wait && !FinishReadyLocked(error)) {
+                return false;
+            }
+            return true;
         } catch (...) {
             SetError(error, "exception while running librime maintenance");
             return false;
@@ -569,7 +589,11 @@ private:
 
     void StartWatchLocked() noexcept {
         if (watch_thread_.joinable()) {
-            return;
+            if (!watch_joined_maintenance_) {
+                return;
+            }
+            watch_thread_.join();
+            async_watch_started_ = false;
         }
         watch_stop_ = false;
         async_watch_started_ = true;
@@ -715,6 +739,11 @@ bool RimeEngine::PollMaintenance(std::string* error) noexcept {
 
 bool RimeEngine::RunMaintenance(bool full_check, std::string* error) noexcept {
     return impl_->RunMaintenance(full_check, error);
+}
+
+bool RimeEngine::StartBackgroundMaintenance(bool full_check,
+                                            std::string* error) noexcept {
+    return impl_->StartBackgroundMaintenance(full_check, error);
 }
 
 RimeEngine::SessionId RimeEngine::CreateSession(std::string* error) noexcept {
