@@ -48,6 +48,23 @@ jobs:
           ruby platforms/ios/scripts/tests/release-config-test.rb
           platforms/ios/scripts/test-simulator.sh
       - name: Verify resources
+        run: python3 platforms/ios/scripts/verify.py
+      - name: Package unsigned IPA
         run: |
-          python3 platforms/ios/scripts/verify.py
-          # No upload, signing credentials or artifact publication in this workflow.
+          APP=$(find platforms/ios/build/DeviceDerivedData/Build/Products -type d -name 'RIMES.app' | head -n 1)
+          test -n "$APP" || { echo 'RIMES.app not found in device build products'; exit 1; }
+          VER="1.0.${GITHUB_RUN_NUMBER}"
+          mkdir -p platforms/ios/build/ipa/Payload
+          cp -R "$APP" platforms/ios/build/ipa/Payload/RIMES.app
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VER" platforms/ios/build/ipa/Payload/RIMES.app/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VER" platforms/ios/build/ipa/Payload/RIMES.app/Info.plist
+          (cd platforms/ios/build/ipa && zip -qry "RIMES-${VER}-unsigned.ipa" Payload)
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' platforms/ios/build/ipa/Payload/RIMES.app/Info.plist
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' platforms/ios/build/ipa/Payload/RIMES.app/Info.plist
+          ls -lh platforms/ios/build/ipa/*.ipa
+      - name: Upload unsigned IPA artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: RIMES-unsigned-ipa
+          path: platforms/ios/build/ipa/*.ipa
+          if-no-files-found: error
