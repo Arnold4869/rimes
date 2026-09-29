@@ -170,16 +170,15 @@ requires an existing installation of [Weasel](https://github.com/rime/weasel) on
 on Linux.
 
 The repository also contains an in-development
-[native Windows foundation](platforms/windows/native/README.md). Its x64/Win32 TSF registration,
-bounded Broker protocol, real `librime` session, and committed-text path have been validated on
-Windows 11. It remains a commit-only engineering milestone: preedit and candidate UI, Broker logon
-startup, a signed installer, and the macOS buffer/workbench are not yet implemented, so it is not
-included in a public release.
+[native Windows foundation](platforms/windows/native/README.md) and a
+[Linux Fcitx5 input method](platforms/linux/ime/README.md). The Linux addon
+links librime, shows preedit/candidates through Fcitx5, and deploys the reviewed
+RIMES data set. It is IME-only (no Buffer/Capsule/Mailbox) and is not a macOS
+release gate.
 
-The public data preview does not include the macOS buffer workbench, AI/translation/OCR, native
-settings, the experimental Windows TSF described above, or a Linux Fcitx5/IBus frontend.
-Cross-batch split-stroke pairing is a current macOS frontend feature and cannot be supplied by a data
-package alone. Use the
+The public data preview does not include the macOS buffer workbench, AI/translation/OCR, or native
+settings. Cross-batch split-stroke pairing is a current macOS frontend feature and cannot be supplied
+by a data package alone. Use the
 **Pre-release** assets named `RIMES-Windows-Data-Preview-*` or
 `RIMES-Linux-Data-Preview-*`; see [CROSS-PLATFORM-PREVIEW.md](CROSS-PLATFORM-PREVIEW.md)
 for the exact boundary, safety model, and validation commands.
@@ -193,6 +192,7 @@ for the exact boundary, safety model, and validation commands.
 | [PLUGIN-CONFIGURATION.md](PLUGIN-CONFIGURATION.md) | Declarative plugin configuration |
 | [UNSIGNED-PREVIEW.md](UNSIGNED-PREVIEW.md) | Download, verification, and safe-install steps for unsigned previews |
 | [CROSS-PLATFORM-PREVIEW.md](CROSS-PLATFORM-PREVIEW.md) | Windows / Linux input-schemes preview boundary and validation |
+| [platforms/linux/ime/README.md](platforms/linux/ime/README.md) | Linux Fcitx5 RIMES input method (step 1, IME only) |
 | [RELEASE.md](RELEASE.md) | Release process: channels, one-command releases, cadence, version rules |
 | [RELEASE-REFERENCE.md](RELEASE-REFERENCE.md) | Release reference: signing, installer, in-app updates, CI |
 | [RELEASE-HISTORY.md](RELEASE-HISTORY.md) | Retired release channels, repository migration, and the rename |

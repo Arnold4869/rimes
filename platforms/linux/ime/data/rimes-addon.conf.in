@@ -1,0 +1,12 @@
+[Addon]
+Name=RIMES
+Comment=RIMES frontend for Fcitx5 (librime)
+Category=InputMethod
+Version=@PROJECT_VERSION@
+Library=rimes
+Type=SharedLibrary
+OnDemand=True
+Configurable=False
+
+[Addon/Dependencies]
+0=core
